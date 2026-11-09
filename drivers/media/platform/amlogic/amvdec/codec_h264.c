@@ -1771,159 +1771,159 @@ static irqreturn_t codec_h264_threaded_isr(struct amvdec_session *sess)
 	struct codec_h264 *h264 = sess->priv;
 	u32 status;
 
-	if (h264) {
-		u32 level = meson_amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL);
-		u32 wp = meson_amvdec_read_dos(core, VLD_MEM_VIFIFO_WP);
-		u32 rp = meson_amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
-		u32 bit_count = meson_amvdec_read_dos(core, VIFF_BIT_CNT);
+	if (!h264)
+		return IRQ_HANDLED;
 
-		status = meson_amvdec_read_dos(core, DPB_STATUS_REG);
-		meson_amvdec_trace(sess, AMVDEC_TR_IRQ, status, level, bit_count);
+	u32 level = meson_amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL);
+	u32 wp = meson_amvdec_read_dos(core, VLD_MEM_VIFIFO_WP);
+	u32 rp = meson_amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+	u32 bit_count = meson_amvdec_read_dos(core, VIFF_BIT_CNT);
+
+	status = meson_amvdec_read_dos(core, DPB_STATUS_REG);
+	meson_amvdec_trace(sess, AMVDEC_TR_IRQ, status, level, bit_count);
+	dev_dbg(core->dev,
+		"H264 multi status: time_ns=%llu irq=%u status=%#04x level=%#x wp=%#x rp=%#x bits=%#x\n",
+		 (unsigned long long)ktime_get_ns(),
+		 ++h264->multi_irq_count, status, level, wp, rp,
+		 bit_count);
+	if (status == H264_SEI_DATA_READY) {
+		meson_amvdec_write_dos_action(core, DPB_STATUS_REG,
+					H264_SEI_DATA_DONE);
 		dev_dbg(core->dev,
-			"H264 multi status: time_ns=%llu irq=%u status=%#04x level=%#x wp=%#x rp=%#x bits=%#x\n",
-			 (unsigned long long)ktime_get_ns(),
-			 ++h264->multi_irq_count, status, level, wp, rp,
-			 bit_count);
-		if (status == H264_SEI_DATA_READY) {
-			meson_amvdec_write_dos_action(core, DPB_STATUS_REG,
-						H264_SEI_DATA_DONE);
-			dev_dbg(core->dev,
-				"H264 multi reply: status=%#04x action=%#04x\n",
-				 status, H264_SEI_DATA_DONE);
-		} else if (status == H264_CONFIG_REQUEST) {
-			u32 scratch1 = meson_amvdec_read_dos(core, AV_SCRATCH_1);
-			u32 scratch2 = meson_amvdec_read_dos(core, AV_SCRATCH_2);
-			u32 scratch6 = meson_amvdec_read_dos(core, AV_SCRATCH_6);
-			u32 scratchb = meson_amvdec_read_dos(core, AV_SCRATCH_B);
+			"H264 multi reply: status=%#04x action=%#04x\n",
+			 status, H264_SEI_DATA_DONE);
+	} else if (status == H264_CONFIG_REQUEST) {
+		u32 scratch1 = meson_amvdec_read_dos(core, AV_SCRATCH_1);
+		u32 scratch2 = meson_amvdec_read_dos(core, AV_SCRATCH_2);
+		u32 scratch6 = meson_amvdec_read_dos(core, AV_SCRATCH_6);
+		u32 scratchb = meson_amvdec_read_dos(core, AV_SCRATCH_B);
 
-			dev_dbg(core->dev,
-				"H264 multi config: scratch1=%#x scratch2=%#x scratch6=%#x scratchb=%#x\n",
-				 scratch1, scratch2, scratch6, scratchb);
-			meson_amvdec_write_dos_action(core, DPB_STATUS_REG,
-						H264_ACTION_CONFIG_DONE);
-			dev_dbg(core->dev,
-				"H264 multi reply: status=%#04x action=%#04x\n",
-				 status, H264_ACTION_CONFIG_DONE);
-			/*
-			 * Answer the configuration request from the host SPS and capture
-			 * format.
-			 */
-			codec_h264_multi_write_dpb_config(sess);
-		} else if (status == H264_SLICE_HEAD_DONE) {
-			u32 action;
+		dev_dbg(core->dev,
+			"H264 multi config: scratch1=%#x scratch2=%#x scratch6=%#x scratchb=%#x\n",
+			 scratch1, scratch2, scratch6, scratchb);
+		meson_amvdec_write_dos_action(core, DPB_STATUS_REG,
+					H264_ACTION_CONFIG_DONE);
+		dev_dbg(core->dev,
+			"H264 multi reply: status=%#04x action=%#04x\n",
+			 status, H264_ACTION_CONFIG_DONE);
+		/*
+		 * Answer the configuration request from the host SPS and capture
+		 * format.
+		 */
+		codec_h264_multi_write_dpb_config(sess);
+	} else if (status == H264_SLICE_HEAD_DONE) {
+		u32 action;
 
-			h264->multi_headers_valid = h264->multi_last_headers_len != 0;
+		h264->multi_headers_valid = h264->multi_last_headers_len != 0;
 
-			if (codec_h264_multi_next_slice(sess)) {
-				dev_err_ratelimited(core->dev_dec, "h264 multi: slice header/picture mismatch\n");
+		if (codec_h264_multi_next_slice(sess)) {
+			dev_err_ratelimited(core->dev_dec, "h264 multi: slice header/picture mismatch\n");
+			codec_h264_multi_abort(sess);
+			return IRQ_HANDLED;
+		}
+		codec_h264_multi_inject_sps_rpm(sess);
+		if (!h264->multi_pic_started) {
+			if (codec_h264_multi_pick_capture(sess)) {
 				codec_h264_multi_abort(sess);
 				return IRQ_HANDLED;
 			}
-			codec_h264_multi_inject_sps_rpm(sess);
-			if (!h264->multi_pic_started) {
-				if (codec_h264_multi_pick_capture(sess)) {
-					codec_h264_multi_abort(sess);
-					return IRQ_HANDLED;
-				}
-				if (codec_h264_multi_config_decode_buf(sess)) {
-					codec_h264_multi_abort(sess);
-					return IRQ_HANDLED;
-				}
-				h264->multi_pic_started = true;
-				action = H264_ACTION_DECODE_NEWPIC;
-			} else {
-				if (codec_h264_multi_config_decode_buf(sess)) {
-					codec_h264_multi_abort(sess);
-					return IRQ_HANDLED;
-				}
-				action = H264_ACTION_DECODE_SLICE;
+			if (codec_h264_multi_config_decode_buf(sess)) {
+				codec_h264_multi_abort(sess);
+				return IRQ_HANDLED;
 			}
-			meson_amvdec_trace(sess, AMVDEC_TR_KICK, action, status, 0);
-			meson_amvdec_write_dos_action(core, DPB_STATUS_REG, action);
-			dev_dbg(core->dev_dec,
-				"H264 multi reply: status=%#04x action=%#04x\n",
-				 status, action);
-		} else if (status == H264_PIC_DATA_DONE) {
-			u32 mby_mbx = meson_amvdec_read_dos(core, H264_MBY_MBX);
-
-			meson_amvdec_trace(sess, AMVDEC_TR_DONE, status,
-				     h264->multi_pic_vb2_idx, mby_mbx);
-			u32 decoded_mbs = ((mby_mbx & 0xff) + 1) *
-					  (((mby_mbx >> 8) & 0xff) + 1);
-			u32 expected_mb_width = h264->multi_sps.pic_width_in_mbs_minus1 + 1;
-			u32 expected_mb_height =
-				(h264->multi_sps.pic_height_in_map_units_minus1 + 1) *
-				((h264->multi_sps.flags &
-				  V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) ? 1 : 2);
-			u32 expected_mbs = expected_mb_width * expected_mb_height;
-
-			dev_dbg(core->dev_dec,
-				"h264 multi pic done: time_ns=%llu fw_idx=%u vb2_idx=%u mby_mbx=%#x decoded_mbs=%u mb_total=%u nal_search_ctl=%#x\n",
-				 (unsigned long long)ktime_get_ns(),
-				 h264->multi_pic_fw_idx, h264->multi_pic_vb2_idx,
-				 mby_mbx, decoded_mbs,
-				 h264->mb_width * h264->mb_height,
-				 meson_amvdec_read_dos(core, NAL_SEARCH_CTL));
-			if (!h264->multi_field_picture && h264->multi_slice_count == 1 &&
-			    ((mby_mbx & 0xff) != expected_mb_height - 1 ||
-			     ((mby_mbx >> 8) & 0xff) != expected_mb_width - 1)) {
-				dev_warn_ratelimited(core->dev_dec,
-						     "h264 multi: incomplete picture: decoded %u/%u macroblocks (mby_mbx=%#x)\n",
-					decoded_mbs, expected_mbs, mby_mbx);
-				h264->multi_done_error = true;
-			}
-			/*
-			 * Record completion and wake the feed worker, which owns removal and
-			 * retirement of m2m buffers.
-			 */
-			if (h264->multi_field_picture) {
-				u32 w = h264->multi_sps.pic_width_in_mbs_minus1 + 1;
-				u32 h = h264->multi_sps.pic_height_in_map_units_minus1 + 1;
-
-				if (!h264->multi_src_vbuf || !h264->multi_pic_started ||
-				    !h264->multi_slice_count ||
-				    (mby_mbx & 255) != h - 1 || ((mby_mbx >> 8) & 255) != w - 1) {
-					codec_h264_multi_abort(sess);
-					return IRQ_HANDLED;
-				}
-				if (!codec_h264_multi_field_advance(h264, 0, 2)) {
-					codec_h264_multi_abort(sess);
-					return IRQ_HANDLED;
-				}
-				dev_dbg(core->dev_dec, "h264 field done: fw=%u bottom=%u count=%u ts=%llu\n",
-					h264->multi_pic_fw_idx, h264->multi_fields[0].bottom_field,
-					w * h, h264->multi_pic_ts);
-			}
-			if (h264->multi_slice_data) {
-				const u8 *remaining = h264->multi_slice_data +
-						      h264->multi_slice_cursor;
-				u32 size = h264->multi_slice_size - h264->multi_slice_cursor;
-				u32 unused_len;
-
-				if (h264_find_first_slice(remaining, size, &unused_len)) {
-					dev_err_ratelimited(core->dev_dec, "h264 multi: picture done with unconsumed slices\n");
-					codec_h264_multi_abort(sess);
-					return IRQ_HANDLED;
-				}
-			}
-			if (h264->multi_pic_started) {
-				h264->multi_pic_started = false;
-				h264->multi_done_fw_idx = h264->multi_pic_fw_idx;
-				h264->multi_done_pending = true;
-				schedule_work(&sess->esparser_queue_work);
-			}
+			h264->multi_pic_started = true;
+			action = H264_ACTION_DECODE_NEWPIC;
 		} else {
-			/*
-			 * Any other status (e.g. the firmware ran out of input on a
-			 * damaged access unit) waits for an action, which isn't sent.
-			 * Abort, otherwise the job never finishes.
-			 */
-			dev_err_ratelimited(core->dev_dec, "h264 multi: unexpected status=%#x field=%u phase=%u\n",
-					    status, h264->multi_field_picture,
-					    READ_ONCE(h264->multi_field_phase));
-			codec_h264_multi_abort(sess);
+			if (codec_h264_multi_config_decode_buf(sess)) {
+				codec_h264_multi_abort(sess);
+				return IRQ_HANDLED;
+			}
+			action = H264_ACTION_DECODE_SLICE;
 		}
-		return IRQ_HANDLED;
+		meson_amvdec_trace(sess, AMVDEC_TR_KICK, action, status, 0);
+		meson_amvdec_write_dos_action(core, DPB_STATUS_REG, action);
+		dev_dbg(core->dev_dec,
+			"H264 multi reply: status=%#04x action=%#04x\n",
+			 status, action);
+	} else if (status == H264_PIC_DATA_DONE) {
+		u32 mby_mbx = meson_amvdec_read_dos(core, H264_MBY_MBX);
+
+		meson_amvdec_trace(sess, AMVDEC_TR_DONE, status,
+			     h264->multi_pic_vb2_idx, mby_mbx);
+		u32 decoded_mbs = ((mby_mbx & 0xff) + 1) *
+				  (((mby_mbx >> 8) & 0xff) + 1);
+		u32 expected_mb_width = h264->multi_sps.pic_width_in_mbs_minus1 + 1;
+		u32 expected_mb_height =
+			(h264->multi_sps.pic_height_in_map_units_minus1 + 1) *
+			((h264->multi_sps.flags &
+			  V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) ? 1 : 2);
+		u32 expected_mbs = expected_mb_width * expected_mb_height;
+
+		dev_dbg(core->dev_dec,
+			"h264 multi pic done: time_ns=%llu fw_idx=%u vb2_idx=%u mby_mbx=%#x decoded_mbs=%u mb_total=%u nal_search_ctl=%#x\n",
+			 (unsigned long long)ktime_get_ns(),
+			 h264->multi_pic_fw_idx, h264->multi_pic_vb2_idx,
+			 mby_mbx, decoded_mbs,
+			 h264->mb_width * h264->mb_height,
+			 meson_amvdec_read_dos(core, NAL_SEARCH_CTL));
+		if (!h264->multi_field_picture && h264->multi_slice_count == 1 &&
+		    ((mby_mbx & 0xff) != expected_mb_height - 1 ||
+		     ((mby_mbx >> 8) & 0xff) != expected_mb_width - 1)) {
+			dev_warn_ratelimited(core->dev_dec,
+					     "h264 multi: incomplete picture: decoded %u/%u macroblocks (mby_mbx=%#x)\n",
+				decoded_mbs, expected_mbs, mby_mbx);
+			h264->multi_done_error = true;
+		}
+		/*
+		 * Record completion and wake the feed worker, which owns removal and
+		 * retirement of m2m buffers.
+		 */
+		if (h264->multi_field_picture) {
+			u32 w = h264->multi_sps.pic_width_in_mbs_minus1 + 1;
+			u32 h = h264->multi_sps.pic_height_in_map_units_minus1 + 1;
+
+			if (!h264->multi_src_vbuf || !h264->multi_pic_started ||
+			    !h264->multi_slice_count ||
+			    (mby_mbx & 255) != h - 1 || ((mby_mbx >> 8) & 255) != w - 1) {
+				codec_h264_multi_abort(sess);
+				return IRQ_HANDLED;
+			}
+			if (!codec_h264_multi_field_advance(h264, 0, 2)) {
+				codec_h264_multi_abort(sess);
+				return IRQ_HANDLED;
+			}
+			dev_dbg(core->dev_dec, "h264 field done: fw=%u bottom=%u count=%u ts=%llu\n",
+				h264->multi_pic_fw_idx, h264->multi_fields[0].bottom_field,
+				w * h, h264->multi_pic_ts);
+		}
+		if (h264->multi_slice_data) {
+			const u8 *remaining = h264->multi_slice_data +
+					      h264->multi_slice_cursor;
+			u32 size = h264->multi_slice_size - h264->multi_slice_cursor;
+			u32 unused_len;
+
+			if (h264_find_first_slice(remaining, size, &unused_len)) {
+				dev_err_ratelimited(core->dev_dec, "h264 multi: picture done with unconsumed slices\n");
+				codec_h264_multi_abort(sess);
+				return IRQ_HANDLED;
+			}
+		}
+		if (h264->multi_pic_started) {
+			h264->multi_pic_started = false;
+			h264->multi_done_fw_idx = h264->multi_pic_fw_idx;
+			h264->multi_done_pending = true;
+			schedule_work(&sess->esparser_queue_work);
+		}
+	} else {
+		/*
+		 * Any other status (e.g. the firmware ran out of input on a
+		 * damaged access unit) waits for an action, which isn't sent.
+		 * Abort, otherwise the job never finishes.
+		 */
+		dev_err_ratelimited(core->dev_dec, "h264 multi: unexpected status=%#x field=%u phase=%u\n",
+				    status, h264->multi_field_picture,
+				    READ_ONCE(h264->multi_field_phase));
+		codec_h264_multi_abort(sess);
 	}
 
 	return IRQ_HANDLED;
