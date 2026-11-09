@@ -2290,13 +2290,6 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 		goto unlock;
 	}
 
-	if (dec_status != HEVC_SLICE_SEGMENT_DONE) {
-		dev_err_ratelimited(core->dev_dec, "Unrecognized dec_status: %08X\n",
-				    dec_status);
-		meson_amvdec_abort(sess);
-		goto unlock;
-	}
-
 	codec_hevc_fetch_rpm(sess);
 	ret = codec_hevc_process_rpm(hevc);
 	if (ret < 0) {
